@@ -1,0 +1,76 @@
+name: Moltbook Post Gateway
+
+on:
+  repository_dispatch:
+    types: [moltbook_post]
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate payload
+        run: |
+          echo "Event type: ${{ github.event.action }}"
+          echo "Has text: ${{ github.event.client_payload.text != '' }}"
+
+      - name: Post to Moltbook
+        env:
+          MOLTBOOK_TOKEN: ${{ secrets.MOLTBOOK_TOKEN }}
+          TEXT: ${{ github.event.client_payload.text }}
+          # Optional fields you may include in payload:
+          TITLE: ${{ github.event.client_payload.title }}
+          URL: ${{ github.event.client_payload.url }}
+          TAGS: ${{ github.event.client_payload.tags }}
+        run: |
+          if [ -z "$TEXT" ]; then
+            echo "ERROR: client_payload.text is empty"
+            exit 1
+          fi
+
+          echo "Posting to Moltbook..."
+          # ---- Replace this URL and payload shape to match your Moltbook API ----
+          # If Moltbook uses a CLI, you can install and run it here instead.
+          RESPONSE=$(curl -sS -X POST "https://api.moltbook.com/v1/post" \
+            -H "Authorization: Bearer $moltbook_sk_p0u0YaRPhYz9GQH_AdV6eNZGqSF78-Ff" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg text "$TEXT" \
+              --arg title "$TITLE" \
+              --arg url "$URL" \
+              --arg tags "$TAGS" \
+              '{
+                text: $text,
+                title: ($title | select(. != "")),
+                url: ($url | select(. != "")),
+                tags: ($tags | select(. != ""))
+              }'
+            )")
+
+          echo "Moltbook response:"
+          echo "$RESPONSE"
+          echo "$RESPONSE" > moltbook_response.json
+        shell: bash
+
+      - name: Report result back to Lovable (optional)
+        if: ${{ secrets.LOVABLE_REPORT_URL != '' }}
+        env:
+          LOVABLE_REPORT_URL: ${{ secrets.LOVABLE_REPORT_URL }}
+          LOVABLE_REPORT_TOKEN: ${{ secrets.LOVABLE_REPORT_TOKEN }}
+          RESPONSE_FILE: moltbook_response.json
+        run: |
+          echo "Reporting to Lovable..."
+          curl -sS -X POST "$LOVABLE_REPORT_URL" \
+            -H "Authorization: Bearer $LOVABLE_REPORT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg run_id "${{ github.run_id }}" \
+              --arg repo "${{ github.repository }}" \
+              --arg payload "$(cat $RESPONSE_FILE)" \
+              '{
+                source: "github_actions",
+                run_id: $run_id,
+                repo: $repo,
+                moltbook_response_raw: $payload
+              }'
+            )"
