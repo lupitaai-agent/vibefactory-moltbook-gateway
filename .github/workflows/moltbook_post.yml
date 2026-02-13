@@ -4,7 +4,6 @@ on:
   repository_dispatch:
     types: [moltbook_post]
 
-  # Optional manual trigger (no defaults; requires explicit input)
   workflow_dispatch:
     inputs:
       mode:
@@ -33,7 +32,7 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Build payload (agent-driven)
+      - name: Resolve inputs (agent-driven)
         env:
           MODE: ${{ github.event.client_payload.mode || inputs.mode }}
           SUBMOLT: ${{ github.event.client_payload.submolt || inputs.submolt }}
@@ -41,20 +40,25 @@ jobs:
           CONTENT: ${{ github.event.client_payload.content || inputs.content }}
           POST_ID: ${{ github.event.client_payload.post_id || inputs.post_id }}
         run: |
-          python3 - <<'PY' > payload.json
-          import json, os
-          payload = {
-            "mode": (os.environ.get("MODE") or "").strip(),
-            "submolt": (os.environ.get("SUBMOLT") or "").strip(),
-            "title": (os.environ.get("TITLE") or "").strip(),
-            "content": (os.environ.get("CONTENT") or "").strip(),
-            "post_id": (os.environ.get("POST_ID") or "").strip()
-          }
-          print(json.dumps(payload))
-          PY
+          # Normalize whitespace
+          MODE="$(echo -n "${MODE}" | xargs)"
+          SUBMOLT="$(echo -n "${SUBMOLT}" | xargs)"
+          TITLE="$(echo -n "${TITLE}" | xargs)"
+          CONTENT="$(echo -n "${CONTENT}" | xargs)"
+          POST_ID="$(echo -n "${POST_ID}" | xargs)"
 
-          echo "Payload created:"
-          cat payload.json
+          echo "MODE=$MODE" >> $GITHUB_ENV
+          echo "SUBMOLT=$SUBMOLT" >> $GITHUB_ENV
+          echo "TITLE=$TITLE" >> $GITHUB_ENV
+          echo "CONTENT=$CONTENT" >> $GITHUB_ENV
+          echo "POST_ID=$POST_ID" >> $GITHUB_ENV
+
+          echo "Resolved:"
+          echo "  mode=$MODE"
+          echo "  submolt=$SUBMOLT"
+          echo "  title=(len ${#TITLE})"
+          echo "  content=(len ${#CONTENT})"
+          echo "  post_id=$POST_ID"
 
       - name: Post to Moltbook (no hard-coded content)
         env:
@@ -67,43 +71,31 @@ jobs:
             exit 1
           fi
 
-          MODE=$(python3 -c "import json; print(json.load(open('payload.json')).get('mode','').strip())")
-          echo "Mode: $MODE"
-
-          if [ -z "$MODE" ]; then
+          if [ -z "${MODE}" ]; then
             echo "ERROR: mode is required ('post' or 'comment')."
             exit 1
           fi
 
-          if [ "$MODE" = "post" ]; then
-            # Strict validation: no placeholders, no defaults
-            SUBMOLT=$(python3 -c "import json; print(json.load(open('payload.json')).get('submolt','').strip())")
-            TITLE=$(python3 -c "import json; print(json.load(open('payload.json')).get('title','').strip())")
-            CONTENT=$(python3 -c "import json; print(json.load(open('payload.json')).get('content','').strip())")
-
-            if [ -z "$SUBMOLT" ]; then
+          if [ "${MODE}" = "post" ]; then
+            # Strict validation: must be supplied by agents (or manual input)
+            if [ -z "${SUBMOLT}" ]; then
               echo "ERROR: submolt is required for post mode."
               exit 1
             fi
-            if [ -z "$TITLE" ]; then
+            if [ -z "${TITLE}" ]; then
               echo "ERROR: title is required for post mode."
               exit 1
             fi
-            if [ -z "$CONTENT" ]; then
+            if [ -z "${CONTENT}" ]; then
               echo "ERROR: content is required for post mode."
               exit 1
             fi
 
-            python3 - <<'PY' > request.json
-            import json
-            p = json.load(open("payload.json"))
-            req = {
-              "submolt": p["submolt"],
-              "title": p["title"],
-              "content": p["content"]
-            }
-            print(json.dumps(req))
-            PY
+            jq -n \
+              --arg submolt "${SUBMOLT}" \
+              --arg title "${TITLE}" \
+              --arg content "${CONTENT}" \
+              '{submolt:$submolt, title:$title, content:$content}' > request.json
 
             echo "Posting to Moltbook /api/v1/posts ..."
             http_code=$(curl -sS --fail-with-body \
@@ -119,29 +111,21 @@ jobs:
                 exit 1
               }
 
-          elif [ "$MODE" = "comment" ]; then
-            # NOTE: Comment endpoint may differ; update once confirmed by Moltbook docs.
-            POST_ID=$(python3 -c "import json; print(json.load(open('payload.json')).get('post_id','').strip())")
-            CONTENT=$(python3 -c "import json; print(json.load(open('payload.json')).get('content','').strip())")
-
-            if [ -z "$POST_ID" ]; then
+          elif [ "${MODE}" = "comment" ]; then
+            # NOTE: endpoint may differ; update once confirmed by Moltbook docs.
+            if [ -z "${POST_ID}" ]; then
               echo "ERROR: post_id is required for comment mode."
               exit 1
             fi
-            if [ -z "$CONTENT" ]; then
+            if [ -z "${CONTENT}" ]; then
               echo "ERROR: content is required for comment mode."
               exit 1
             fi
 
-            python3 - <<'PY' > request.json
-            import json
-            p = json.load(open("payload.json"))
-            req = {
-              "post_id": p["post_id"],
-              "content": p["content"]
-            }
-            print(json.dumps(req))
-            PY
+            jq -n \
+              --arg post_id "${POST_ID}" \
+              --arg content "${CONTENT}" \
+              '{post_id:$post_id, content:$content}' > request.json
 
             echo "Commenting to Moltbook /api/v1/comments ..."
             http_code=$(curl -sS --fail-with-body \
@@ -158,7 +142,7 @@ jobs:
               }
 
           else
-            echo "ERROR: Unknown mode '$MODE'. Use 'post' or 'comment'."
+            echo "ERROR: Unknown mode '${MODE}'. Use 'post' or 'comment'."
             exit 1
           fi
 
