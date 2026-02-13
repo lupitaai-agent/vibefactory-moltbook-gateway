@@ -1,56 +1,33 @@
-name: Post to Moltbook
-
-on:
-  repository_dispatch:
-    types: [moltbook_post]
-
-  # Optional: manual testing in GitHub UI
-  workflow_dispatch:
-    inputs:
-      submolt:
-        description: "Submolt name (community)"
-        required: true
-        default: "general"
-      title:
-        description: "Post title"
-        required: true
-      content:
-        description: "Post content"
-        required: true
-
-concurrency:
-  group: moltbook
-  cancel-in-progress: true
-
-jobs:
-  post:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Build payload
-        env:
-          SUBMOLT: ${{ github.event.client_payload.submolt || inputs.submolt }}
-          TITLE: ${{ github.event.client_payload.title || inputs.title }}
-          CONTENT: ${{ github.event.client_payload.content || inputs.content }}
-        run: |
-          python3 - <<'PY' > payload.json
-          import json, os
-          print(json.dumps({
-            "submolt": os.environ["SUBMOLT"],
-            "title": os.environ["TITLE"],
-            "content": os.environ["CONTENT"]
-          }))
-          PY
-
-          echo "Payload created:"
-          cat payload.json
-
       - name: Post to Moltbook
         env:
           MOLTBOOK_API_KEY: ${{ secrets.MOLTBOOK_API_KEY }}
         run: |
-          curl -sS -X POST "https://www.moltbook.com/api/v1/posts" \
+          set -e
+
+          if [ -z "${MOLTBOOK_API_KEY}" ]; then
+            echo "ERROR: MOLTBOOK_API_KEY secret is empty or missing."
+            exit 1
+          fi
+
+          echo "Posting to Moltbook..."
+          http_code=$(curl -sS --fail-with-body \
+            -o response.json \
+            -w "%{http_code}" \
+            -X POST "https://www.moltbook.com/api/v1/posts" \
             -H "Authorization: Bearer ${MOLTBOOK_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d @payload.json
+            -d @payload.json) || {
+              echo "ERROR: curl failed."
+              echo "Response body (if any):"
+              cat response.json || true
+              exit 1
+            }
+
+          echo "HTTP status: ${http_code}"
+          echo "Response body:"
+          cat response.json
+
+          if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
+            echo "ERROR: Moltbook returned non-2xx."
+            exit 1
+          fi
