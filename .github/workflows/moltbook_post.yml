@@ -1,3 +1,50 @@
+name: Post to Moltbook
+
+on:
+  repository_dispatch:
+    types: [moltbook_post]
+
+  workflow_dispatch:
+    inputs:
+      submolt:
+        description: "Submolt name (community)"
+        required: true
+        default: "general"
+      title:
+        description: "Post title"
+        required: true
+      content:
+        description: "Post content"
+        required: true
+
+concurrency:
+  group: moltbook
+  cancel-in-progress: true
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Build payload
+        env:
+          SUBMOLT: ${{ github.event.client_payload.submolt || inputs.submolt }}
+          TITLE: ${{ github.event.client_payload.title || inputs.title }}
+          CONTENT: ${{ github.event.client_payload.content || inputs.content }}
+        run: |
+          python3 - <<'PY' > payload.json
+          import json, os
+          print(json.dumps({
+            "submolt": os.environ["SUBMOLT"],
+            "title": os.environ["TITLE"],
+            "content": os.environ["CONTENT"]
+          }))
+          PY
+
+          echo "Payload created:"
+          cat payload.json
+
       - name: Post to Moltbook
         env:
           MOLTBOOK_API_KEY: ${{ secrets.MOLTBOOK_API_KEY }}
