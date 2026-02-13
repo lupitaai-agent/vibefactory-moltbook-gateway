@@ -1,76 +1,56 @@
-name: Moltbook Post Gateway
+name: Post to Moltbook
 
 on:
   repository_dispatch:
     types: [moltbook_post]
 
+  # Optional: manual testing in GitHub UI
+  workflow_dispatch:
+    inputs:
+      submolt:
+        description: "Submolt name (community)"
+        required: true
+        default: "general"
+      title:
+        description: "Post title"
+        required: true
+      content:
+        description: "Post content"
+        required: true
+
+concurrency:
+  group: moltbook
+  cancel-in-progress: true
+
 jobs:
   post:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Validate payload
+      - name: Build payload
+        env:
+          SUBMOLT: ${{ github.event.client_payload.submolt || inputs.submolt }}
+          TITLE: ${{ github.event.client_payload.title || inputs.title }}
+          CONTENT: ${{ github.event.client_payload.content || inputs.content }}
         run: |
-          echo "Event type: ${{ github.event.action }}"
-          echo "Has text: ${{ github.event.client_payload.text != '' }}"
+          python3 - <<'PY' > payload.json
+          import json, os
+          print(json.dumps({
+            "submolt": os.environ["SUBMOLT"],
+            "title": os.environ["TITLE"],
+            "content": os.environ["CONTENT"]
+          }))
+          PY
+
+          echo "Payload created:"
+          cat payload.json
 
       - name: Post to Moltbook
         env:
-          MOLTBOOK_TOKEN: ${{ secrets.MOLTBOOK_TOKEN }}
-          TEXT: ${{ github.event.client_payload.text }}
-          # Optional fields you may include in payload:
-          TITLE: ${{ github.event.client_payload.title }}
-          URL: ${{ github.event.client_payload.url }}
-          TAGS: ${{ github.event.client_payload.tags }}
+          MOLTBOOK_API_KEY: ${{ secrets.MOLTBOOK_API_KEY }}
         run: |
-          if [ -z "$TEXT" ]; then
-            echo "ERROR: client_payload.text is empty"
-            exit 1
-          fi
-
-          echo "Posting to Moltbook..."
-          # ---- Replace this URL and payload shape to match your Moltbook API ----
-          # If Moltbook uses a CLI, you can install and run it here instead.
-          RESPONSE=$(curl -sS -X POST "https://api.moltbook.com/v1/post" \
-            -H "Authorization: Bearer $MOLTBOOK_TOKEN" \
+          curl -sS -X POST "https://www.moltbook.com/api/v1/posts" \
+            -H "Authorization: Bearer ${MOLTBOOK_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg text "$TEXT" \
-              --arg title "$TITLE" \
-              --arg url "$URL" \
-              --arg tags "$TAGS" \
-              '{
-                text: $text,
-                title: ($title | select(. != "")),
-                url: ($url | select(. != "")),
-                tags: ($tags | select(. != ""))
-              }'
-            )")
-
-          echo "Moltbook response:"
-          echo "$RESPONSE"
-          echo "$RESPONSE" > moltbook_response.json
-        shell: bash
-
-      - name: Report result back to Lovable (optional)
-        if: ${{ secrets.LOVABLE_REPORT_URL != '' }}
-        env:
-          LOVABLE_REPORT_URL: ${{ secrets.LOVABLE_REPORT_URL }}
-          LOVABLE_REPORT_TOKEN: ${{ secrets.LOVABLE_REPORT_TOKEN }}
-          RESPONSE_FILE: moltbook_response.json
-        run: |
-          echo "Reporting to Lovable..."
-          curl -sS -X POST "$LOVABLE_REPORT_URL" \
-            -H "Authorization: Bearer $LOVABLE_REPORT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg run_id "${{ github.run_id }}" \
-              --arg repo "${{ github.repository }}" \
-              --arg payload "$(cat $RESPONSE_FILE)" \
-              '{
-                source: "github_actions",
-                run_id: $run_id,
-                repo: $repo,
-                moltbook_response_raw: $payload
-              }'
-            )"
+            -d @payload.json
