@@ -4,48 +4,59 @@ on:
   repository_dispatch:
     types: [moltbook_post]
 
+  # Optional manual trigger (no defaults; requires explicit input)
   workflow_dispatch:
     inputs:
+      mode:
+        description: "post | comment"
+        required: true
       submolt:
-        description: "Submolt name (community)"
-        required: true
-        default: "general"
+        description: "Submolt/community (for posts)"
+        required: false
       title:
-        description: "Post title"
-        required: true
+        description: "Post title (for posts)"
+        required: false
       content:
-        description: "Post content"
+        description: "Content (for posts/comments)"
         required: true
+      post_id:
+        description: "Post ID (for comments)"
+        required: false
 
 concurrency:
   group: moltbook
   cancel-in-progress: true
 
 jobs:
-  post:
+  moltbook:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Build payload
+      - name: Build payload (agent-driven)
         env:
+          MODE: ${{ github.event.client_payload.mode || inputs.mode }}
           SUBMOLT: ${{ github.event.client_payload.submolt || inputs.submolt }}
           TITLE: ${{ github.event.client_payload.title || inputs.title }}
           CONTENT: ${{ github.event.client_payload.content || inputs.content }}
+          POST_ID: ${{ github.event.client_payload.post_id || inputs.post_id }}
         run: |
           python3 - <<'PY' > payload.json
           import json, os
-          print(json.dumps({
-            "submolt": os.environ["SUBMOLT"],
-            "title": os.environ["TITLE"],
-            "content": os.environ["CONTENT"]
-          }))
+          payload = {
+            "mode": (os.environ.get("MODE") or "").strip(),
+            "submolt": (os.environ.get("SUBMOLT") or "").strip(),
+            "title": (os.environ.get("TITLE") or "").strip(),
+            "content": (os.environ.get("CONTENT") or "").strip(),
+            "post_id": (os.environ.get("POST_ID") or "").strip()
+          }
+          print(json.dumps(payload))
           PY
 
           echo "Payload created:"
           cat payload.json
 
-      - name: Post to Moltbook
+      - name: Post to Moltbook (no hard-coded content)
         env:
           MOLTBOOK_API_KEY: ${{ secrets.MOLTBOOK_API_KEY }}
         run: |
@@ -56,19 +67,100 @@ jobs:
             exit 1
           fi
 
-          echo "Posting to Moltbook..."
-          http_code=$(curl -sS --fail-with-body \
-            -o response.json \
-            -w "%{http_code}" \
-            -X POST "https://www.moltbook.com/api/v1/posts" \
-            -H "Authorization: Bearer ${MOLTBOOK_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d @payload.json) || {
-              echo "ERROR: curl failed."
-              echo "Response body (if any):"
-              cat response.json || true
+          MODE=$(python3 -c "import json; print(json.load(open('payload.json')).get('mode','').strip())")
+          echo "Mode: $MODE"
+
+          if [ -z "$MODE" ]; then
+            echo "ERROR: mode is required ('post' or 'comment')."
+            exit 1
+          fi
+
+          if [ "$MODE" = "post" ]; then
+            # Strict validation: no placeholders, no defaults
+            SUBMOLT=$(python3 -c "import json; print(json.load(open('payload.json')).get('submolt','').strip())")
+            TITLE=$(python3 -c "import json; print(json.load(open('payload.json')).get('title','').strip())")
+            CONTENT=$(python3 -c "import json; print(json.load(open('payload.json')).get('content','').strip())")
+
+            if [ -z "$SUBMOLT" ]; then
+              echo "ERROR: submolt is required for post mode."
               exit 1
+            fi
+            if [ -z "$TITLE" ]; then
+              echo "ERROR: title is required for post mode."
+              exit 1
+            fi
+            if [ -z "$CONTENT" ]; then
+              echo "ERROR: content is required for post mode."
+              exit 1
+            fi
+
+            python3 - <<'PY' > request.json
+            import json
+            p = json.load(open("payload.json"))
+            req = {
+              "submolt": p["submolt"],
+              "title": p["title"],
+              "content": p["content"]
             }
+            print(json.dumps(req))
+            PY
+
+            echo "Posting to Moltbook /api/v1/posts ..."
+            http_code=$(curl -sS --fail-with-body \
+              -o response.json \
+              -w "%{http_code}" \
+              -X POST "https://www.moltbook.com/api/v1/posts" \
+              -H "Authorization: Bearer ${MOLTBOOK_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d @request.json) || {
+                echo "ERROR: curl failed."
+                echo "Response body:"
+                cat response.json || true
+                exit 1
+              }
+
+          elif [ "$MODE" = "comment" ]; then
+            # NOTE: Comment endpoint may differ; update once confirmed by Moltbook docs.
+            POST_ID=$(python3 -c "import json; print(json.load(open('payload.json')).get('post_id','').strip())")
+            CONTENT=$(python3 -c "import json; print(json.load(open('payload.json')).get('content','').strip())")
+
+            if [ -z "$POST_ID" ]; then
+              echo "ERROR: post_id is required for comment mode."
+              exit 1
+            fi
+            if [ -z "$CONTENT" ]; then
+              echo "ERROR: content is required for comment mode."
+              exit 1
+            fi
+
+            python3 - <<'PY' > request.json
+            import json
+            p = json.load(open("payload.json"))
+            req = {
+              "post_id": p["post_id"],
+              "content": p["content"]
+            }
+            print(json.dumps(req))
+            PY
+
+            echo "Commenting to Moltbook /api/v1/comments ..."
+            http_code=$(curl -sS --fail-with-body \
+              -o response.json \
+              -w "%{http_code}" \
+              -X POST "https://www.moltbook.com/api/v1/comments" \
+              -H "Authorization: Bearer ${MOLTBOOK_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d @request.json) || {
+                echo "ERROR: curl failed."
+                echo "Response body:"
+                cat response.json || true
+                exit 1
+              }
+
+          else
+            echo "ERROR: Unknown mode '$MODE'. Use 'post' or 'comment'."
+            exit 1
+          fi
 
           echo "HTTP status: ${http_code}"
           echo "Response body:"
@@ -78,3 +170,5 @@ jobs:
             echo "ERROR: Moltbook returned non-2xx."
             exit 1
           fi
+
+          echo "✅ Moltbook action successful."
