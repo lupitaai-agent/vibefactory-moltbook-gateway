@@ -1,114 +1,83 @@
-name: Lovable Deploy Bridge (patch -> commit -> sync)
+name: Lovable Deploy Bridge
 
 on:
   repository_dispatch:
     types: [lovable_build]
 
-permissions:
-  contents: write
-
 concurrency:
-  group: lovable-deploy
+  group: lovable-build
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Mark task executing (Supabase)
+      - name: Validate payload
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          TASKS_TABLE: ${{ secrets.SUPABASE_TASKS_TABLE }}
           TASK_ID: ${{ github.event.client_payload.task_id }}
+          PROMPT: ${{ github.event.client_payload.prompt }}
         run: |
           set -e
           if [ -z "$TASK_ID" ]; then
             echo "ERROR: client_payload.task_id missing"
             exit 1
           fi
-
-          curl -sS -X PATCH "$SUPABASE_URL/rest/v1/$TASKS_TABLE?id=eq.$TASK_ID" \
-            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Content-Type: application/json" \
-            -H "Prefer: return=minimal" \
-            -d '{"status":"executing","updated_at":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}'
-
-      - name: Apply patch and commit
-        id: apply
-        env:
-          PATCH_B64: ${{ github.event.client_payload.patch_b64 }}
-          TASK_ID: ${{ github.event.client_payload.task_id }}
-          COMMIT_MESSAGE: ${{ github.event.client_payload.commit_message }}
-        run: |
-          set -e
-
-          if [ -z "$PATCH_B64" ]; then
-            echo "ERROR: client_payload.patch_b64 missing"
+          if [ -z "$PROMPT" ]; then
+            echo "ERROR: client_payload.prompt missing"
             exit 1
           fi
+          echo "Got task_id=$TASK_ID (prompt length: ${#PROMPT})"
 
-          echo "$PATCH_B64" | base64 -d > change.patch
+      - name: Mark task executing (Lovable webhook)
+        env:
+          URL: ${{ secrets.LOVABLE_WEBHOOK_URL }}
+          TOKEN: ${{ secrets.LOVABLE_WEBHOOK_TOKEN }}
+          TASK_ID: ${{ github.event.client_payload.task_id }}
+        run: |
+          set -e
+          curl -sS --fail-with-body -X POST "$URL" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"task_id\":\"$TASK_ID\",\"status\":\"executing\"}"
 
-          # Validate patch applies cleanly
-          git apply --check change.patch
+      - name: Trigger Lovable build
+        env:
+          LOVABLE_API_KEY: ${{ secrets.LOVABLE_API_KEY }}
+          PROMPT: ${{ github.event.client_payload.prompt }}
+        run: |
+          set -e
+          # NOTE: This endpoint must match what Lovable actually supports in your environment.
+          # Replace URL and payload shape if your Lovable team gave you a different endpoint.
+          curl -sS --fail-with-body -X POST "https://api.lovable.dev/v1/build" \
+            -H "Authorization: Bearer ${LOVABLE_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg prompt "$PROMPT" '{prompt:$prompt}')"
+        shell: bash
 
-          # Apply patch
-          git apply change.patch
-
-          # Commit
-          git config user.name "vibefactory-cao"
-          git config user.email "cao@users.noreply.github.com"
-
-          git add -A
-
-          MSG="$COMMIT_MESSAGE"
-          if [ -z "$MSG" ]; then
-            MSG="CAO deploy (task $TASK_ID)"
-          fi
-
-          git commit -m "$MSG"
-
-          # Push to main
-          git push origin main
-
-      - name: Mark task done (Supabase)
+      - name: Mark task done (Lovable webhook)
         if: success()
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          TASKS_TABLE: ${{ secrets.SUPABASE_TASKS_TABLE }}
+          URL: ${{ secrets.LOVABLE_WEBHOOK_URL }}
+          TOKEN: ${{ secrets.LOVABLE_WEBHOOK_TOKEN }}
           TASK_ID: ${{ github.event.client_payload.task_id }}
         run: |
           set -e
-          curl -sS -X PATCH "$SUPABASE_URL/rest/v1/$TASKS_TABLE?id=eq.$TASK_ID" \
-            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+          curl -sS --fail-with-body -X POST "$URL" \
+            -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
-            -H "Prefer: return=minimal" \
-            -d '{"status":"done","executed_at":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'","updated_at":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}'
+            -d "{\"task_id\":\"$TASK_ID\",\"status\":\"done\"}"
 
-      - name: Mark task failed (Supabase)
+      - name: Mark task failed (Lovable webhook)
         if: failure()
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          TASKS_TABLE: ${{ secrets.SUPABASE_TASKS_TABLE }}
+          URL: ${{ secrets.LOVABLE_WEBHOOK_URL }}
+          TOKEN: ${{ secrets.LOVABLE_WEBHOOK_TOKEN }}
           TASK_ID: ${{ github.event.client_payload.task_id }}
         run: |
-          set -e
-          # Best-effort: record failure
-          curl -sS -X PATCH "$SUPABASE_URL/rest/v1/$TASKS_TABLE?id=eq.$TASK_ID" \
-            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+          # Best-effort report
+          curl -sS -X POST "$URL" \
+            -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
-            -H "Prefer: return=minimal" \
-            -d '{"status":"failed","error":"GitHub action failed (see Actions logs)","updated_at":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}' || true
+            -d "{\"task_id\":\"$TASK_ID\",\"status\":\"failed\"}" || true
