@@ -28,9 +28,9 @@ jobs:
             echo "ERROR: client_payload.prompt missing"
             exit 1
           fi
-          echo "Got task_id=$TASK_ID (prompt length: ${#PROMPT})"
+          echo "OK: task_id=$TASK_ID, prompt_len=${#PROMPT}"
 
-      - name: Mark task executing (Lovable webhook)
+      - name: Report status (executing)
         env:
           URL: ${{ secrets.LOVABLE_WEBHOOK_URL }}
           TOKEN: ${{ secrets.LOVABLE_WEBHOOK_TOKEN }}
@@ -40,23 +40,30 @@ jobs:
           curl -sS --fail-with-body -X POST "$URL" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"task_id\":\"$TASK_ID\",\"status\":\"executing\"}"
+            -d "$(jq -n \
+              --arg task_id "$TASK_ID" \
+              --arg status "executing" \
+              --arg run_id "${{ github.run_id }}" \
+              --arg repo "${{ github.repository }}" \
+              '{task_id:$task_id,status:$status,run_id:$run_id,repo:$repo}')"
 
-      - name: Trigger Lovable build
+      - name: Trigger Lovable build (Build URL)
         env:
-          LOVABLE_API_KEY: ${{ secrets.LOVABLE_API_KEY }}
+          LOVABLE_BUILD_URL: ${{ secrets.LOVABLE_BUILD_URL }}
           PROMPT: ${{ github.event.client_payload.prompt }}
         run: |
           set -e
-          # NOTE: This endpoint must match what Lovable actually supports in your environment.
-          # Replace URL and payload shape if your Lovable team gave you a different endpoint.
-          curl -sS --fail-with-body -X POST "https://api.lovable.dev/v1/build" \
-            -H "Authorization: Bearer ${LOVABLE_API_KEY}" \
+          if [ -z "$LOVABLE_BUILD_URL" ]; then
+            echo "ERROR: LOVABLE_BUILD_URL secret missing"
+            exit 1
+          fi
+
+          # POST prompt to Lovable Build URL
+          curl -sS --fail-with-body -X POST "$LOVABLE_BUILD_URL" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg prompt "$PROMPT" '{prompt:$prompt}')"
-        shell: bash
 
-      - name: Mark task done (Lovable webhook)
+      - name: Report status (done)
         if: success()
         env:
           URL: ${{ secrets.LOVABLE_WEBHOOK_URL }}
@@ -67,17 +74,27 @@ jobs:
           curl -sS --fail-with-body -X POST "$URL" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"task_id\":\"$TASK_ID\",\"status\":\"done\"}"
+            -d "$(jq -n \
+              --arg task_id "$TASK_ID" \
+              --arg status "done" \
+              --arg run_id "${{ github.run_id }}" \
+              --arg repo "${{ github.repository }}" \
+              '{task_id:$task_id,status:$status,run_id:$run_id,repo:$repo}')"
 
-      - name: Mark task failed (Lovable webhook)
+      - name: Report status (failed)
         if: failure()
         env:
           URL: ${{ secrets.LOVABLE_WEBHOOK_URL }}
           TOKEN: ${{ secrets.LOVABLE_WEBHOOK_TOKEN }}
           TASK_ID: ${{ github.event.client_payload.task_id }}
         run: |
-          # Best-effort report
+          # best-effort; don't fail twice
           curl -sS -X POST "$URL" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"task_id\":\"$TASK_ID\",\"status\":\"failed\"}" || true
+            -d "$(jq -n \
+              --arg task_id "$TASK_ID" \
+              --arg status "failed" \
+              --arg run_id "${{ github.run_id }}" \
+              --arg repo "${{ github.repository }}" \
+              '{task_id:$task_id,status:$status,run_id:$run_id,repo:$repo}')" || true
