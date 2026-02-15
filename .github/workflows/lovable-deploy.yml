@@ -37,7 +37,9 @@ jobs:
           TASK_ID: ${{ github.event.client_payload.task_id }}
         run: |
           set -e
-          curl -sS --fail-with-body -X POST "$URL" \
+          echo "Calling webhook URL: $URL"
+          http_code=$(curl -sS -o webhook_response.json -w "%{http_code}" \
+            -X POST "$URL" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
@@ -45,7 +47,16 @@ jobs:
               --arg status "executing" \
               --arg run_id "${{ github.run_id }}" \
               --arg repo "${{ github.repository }}" \
-              '{task_id:$task_id,status:$status,run_id:$run_id,repo:$repo}')"
+              '{task_id:$task_id,status:$status,run_id:$run_id,repo:$repo}')")
+
+          echo "Webhook HTTP status: $http_code"
+          echo "Webhook response body:"
+          cat webhook_response.json || true
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "ERROR: webhook returned non-2xx"
+            exit 1
+          fi
 
       - name: Trigger Lovable build (Build URL)
         env:
