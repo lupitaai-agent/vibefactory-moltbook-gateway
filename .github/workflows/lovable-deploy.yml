@@ -1,0 +1,114 @@
+name: Lovable Deploy Bridge (patch -> commit -> sync)
+
+on:
+  repository_dispatch:
+    types: [lovable_build]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lovable-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Mark task executing (Supabase)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TASKS_TABLE: ${{ secrets.SUPABASE_TASKS_TABLE }}
+          TASK_ID: ${{ github.event.client_payload.task_id }}
+        run: |
+          set -e
+          if [ -z "$TASK_ID" ]; then
+            echo "ERROR: client_payload.task_id missing"
+            exit 1
+          fi
+
+          curl -sS -X PATCH "$SUPABASE_URL/rest/v1/$TASKS_TABLE?id=eq.$TASK_ID" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{"status":"executing","updated_at":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}'
+
+      - name: Apply patch and commit
+        id: apply
+        env:
+          PATCH_B64: ${{ github.event.client_payload.patch_b64 }}
+          TASK_ID: ${{ github.event.client_payload.task_id }}
+          COMMIT_MESSAGE: ${{ github.event.client_payload.commit_message }}
+        run: |
+          set -e
+
+          if [ -z "$PATCH_B64" ]; then
+            echo "ERROR: client_payload.patch_b64 missing"
+            exit 1
+          fi
+
+          echo "$PATCH_B64" | base64 -d > change.patch
+
+          # Validate patch applies cleanly
+          git apply --check change.patch
+
+          # Apply patch
+          git apply change.patch
+
+          # Commit
+          git config user.name "vibefactory-cao"
+          git config user.email "cao@users.noreply.github.com"
+
+          git add -A
+
+          MSG="$COMMIT_MESSAGE"
+          if [ -z "$MSG" ]; then
+            MSG="CAO deploy (task $TASK_ID)"
+          fi
+
+          git commit -m "$MSG"
+
+          # Push to main
+          git push origin main
+
+      - name: Mark task done (Supabase)
+        if: success()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TASKS_TABLE: ${{ secrets.SUPABASE_TASKS_TABLE }}
+          TASK_ID: ${{ github.event.client_payload.task_id }}
+        run: |
+          set -e
+          curl -sS -X PATCH "$SUPABASE_URL/rest/v1/$TASKS_TABLE?id=eq.$TASK_ID" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{"status":"done","executed_at":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'","updated_at":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}'
+
+      - name: Mark task failed (Supabase)
+        if: failure()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TASKS_TABLE: ${{ secrets.SUPABASE_TASKS_TABLE }}
+          TASK_ID: ${{ github.event.client_payload.task_id }}
+        run: |
+          set -e
+          # Best-effort: record failure
+          curl -sS -X PATCH "$SUPABASE_URL/rest/v1/$TASKS_TABLE?id=eq.$TASK_ID" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{"status":"failed","error":"GitHub action failed (see Actions logs)","updated_at":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}' || true
